@@ -122,6 +122,206 @@ const RACES = [
   },
 ];
 
+/* ════════════════════════════════════════════════════════════════
+   AUDIO MANAGER — Web Audio API synthesis, no external files
+════════════════════════════════════════════════════════════════ */
+class AudioManager {
+  constructor() {
+    this._ctx      = null;
+    this._master   = null;
+    this._noiseBuf = null;  // shared noise buffer reused for hoofbeats
+    this._crowd    = null;  // { src, gn }
+    this._beats    = new Map(); // horse → last beat index
+    this.enabled   = true;
+  }
+
+  /* Call once on first user gesture to unlock AudioContext */
+  init() {
+    if (this._ctx) { this.resume(); return; }
+    try {
+      this._ctx    = new (window.AudioContext || window.webkitAudioContext)();
+      this._master = this._ctx.createGain();
+      this._master.gain.value = 0.65;
+      this._master.connect(this._ctx.destination);
+
+      /* 1-second noise buffer, reused as source material for hoofbeats */
+      const sr  = this._ctx.sampleRate;
+      this._noiseBuf = this._ctx.createBuffer(1, sr, sr);
+      const nd  = this._noiseBuf.getChannelData(0);
+      for (let i = 0; i < sr; i++) nd[i] = Math.random() * 2 - 1;
+    } catch (_) {
+      this.enabled = false;
+    }
+  }
+
+  resume() {
+    if (this._ctx?.state === 'suspended') this._ctx.resume();
+  }
+
+  toggle() {
+    this.enabled = !this.enabled;
+    if (this._master) this._master.gain.value = this.enabled ? 0.65 : 0;
+    return this.enabled;
+  }
+
+  /* ── Gate horn blast ── */
+  playGateBell() {
+    if (!this._ok()) return;
+    const now = this._ctx.currentTime;
+    [[220, 0], [440, 0.025], [660, 0.05]].forEach(([freq, delay]) => {
+      const osc = this._ctx.createOscillator();
+      osc.type = 'sawtooth'; osc.frequency.value = freq;
+      const g = this._ctx.createGain();
+      g.gain.setValueAtTime(0.001, now + delay);
+      g.gain.linearRampToValueAtTime(0.18, now + delay + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.001, now + delay + 0.55);
+      osc.connect(g); g.connect(this._master);
+      osc.start(now + delay); osc.stop(now + delay + 0.65);
+    });
+  }
+
+  /* ── Hoofbeats — call every frame with the horses array ── */
+  updateHoofbeats(horses) {
+    if (!this._ok()) return;
+    for (const h of horses) {
+      const beat = Math.floor(h.gallop / Math.PI);
+      if (h.finished || h.velocity < 10) { this._beats.set(h, beat); continue; }
+      const prev = this._beats.has(h) ? this._beats.get(h) : beat;
+      if (beat > prev) {
+        const pan = (h.laneIdx / Math.max(1, h.numLanes - 1) - 0.5) * 0.55;
+        const vol = 0.12 + Math.min(0.4, (h.velocity - 10) / 40 * 0.45);
+        this._thud(pan, vol);
+      }
+      this._beats.set(h, beat);
+    }
+  }
+
+  _thud(pan, vol) {
+    const now    = this._ctx.currentTime;
+    const offset = Math.random() * (this._noiseBuf.duration - 0.07);
+    const src    = this._ctx.createBufferSource();
+    src.buffer   = this._noiseBuf;
+
+    const filt = this._ctx.createBiquadFilter();
+    filt.type = 'bandpass';
+    filt.frequency.value = 90 + Math.random() * 95;
+    filt.Q.value = 1.1;
+
+    const g = this._ctx.createGain();
+    g.gain.setValueAtTime(vol, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.065);
+
+    const sp = this._ctx.createStereoPanner();
+    sp.pan.value = Math.max(-1, Math.min(1, pan));
+
+    src.connect(filt); filt.connect(g); g.connect(sp); sp.connect(this._master);
+    src.start(now, offset, 0.07);
+  }
+
+  /* ── Crowd ambience ── */
+  startCrowd() {
+    if (!this._ok() || this._crowd) return;
+    const now = this._ctx.currentTime;
+    const sr  = this._ctx.sampleRate;
+
+    const buf = this._ctx.createBuffer(2, sr * 2, sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    const src = this._ctx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+
+    const rumble  = this._ctx.createBiquadFilter();
+    rumble.type = 'lowpass'; rumble.frequency.value = 320;
+
+    const chatter = this._ctx.createBiquadFilter();
+    chatter.type = 'bandpass'; chatter.frequency.value = 1100; chatter.Q.value = 0.4;
+
+    const gn = this._ctx.createGain();
+    gn.gain.setValueAtTime(0.10, now);
+
+    src.connect(rumble);  rumble.connect(gn);
+    src.connect(chatter); chatter.connect(gn);
+    gn.connect(this._master);
+    src.start(now);
+    this._crowd = { src, gn };
+  }
+
+  updateCrowd(progress) {
+    if (!this._crowd || !this._ctx) return;
+    const target = 0.08 + progress * 0.22;
+    this._crowd.gn.gain.setTargetAtTime(target, this._ctx.currentTime, 0.55);
+  }
+
+  crowdCheer() {
+    if (!this._crowd || !this._ctx) return;
+    const now = this._ctx.currentTime;
+    const gp  = this._crowd.gn.gain;
+    gp.cancelScheduledValues(now);
+    gp.setValueAtTime(gp.value, now);
+    gp.linearRampToValueAtTime(0.78, now + 0.35);
+    gp.exponentialRampToValueAtTime(0.18, now + 4.2);
+  }
+
+  stopCrowd() {
+    if (!this._crowd) return;
+    try { this._crowd.src.stop(); } catch (_) {}
+    this._crowd = null;
+  }
+
+  /* ── Finish fanfare or photo-finish sting ── */
+  playFinish(isPhoto = false) {
+    if (!this._ok()) return;
+    const now = this._ctx.currentTime;
+    if (isPhoto) {
+      /* tense tremolo sting */
+      const osc = this._ctx.createOscillator();
+      osc.type = 'sawtooth'; osc.frequency.value = 440;
+      const lfo = this._ctx.createOscillator();
+      lfo.type = 'sine'; lfo.frequency.value = 18;
+      const lfoG = this._ctx.createGain(); lfoG.gain.value = 38;
+      lfo.connect(lfoG); lfoG.connect(osc.frequency);
+      const g = this._ctx.createGain();
+      g.gain.setValueAtTime(0.20, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
+      osc.connect(g); g.connect(this._master);
+      osc.start(now); osc.stop(now + 1.6);
+      lfo.start(now); lfo.stop(now + 1.6);
+    } else {
+      /* ascending fanfare phrase */
+      const notes = [523, 659, 784, 1047, 784, 1047];
+      const times = [0,  0.13, 0.26, 0.42, 0.52, 0.62];
+      const durs  = [0.2, 0.2, 0.2,  0.35, 0.12, 0.65];
+      for (let i = 0; i < notes.length; i++) {
+        const osc = this._ctx.createOscillator();
+        osc.type = 'square'; osc.frequency.value = notes[i];
+        const g = this._ctx.createGain();
+        g.gain.setValueAtTime(0.001, now + times[i]);
+        g.gain.linearRampToValueAtTime(0.16, now + times[i] + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, now + times[i] + durs[i]);
+        osc.connect(g); g.connect(this._master);
+        osc.start(now + times[i]); osc.stop(now + times[i] + durs[i] + 0.05);
+      }
+    }
+  }
+
+  /* ── UI click ── */
+  playClick() {
+    if (!this._ok()) return;
+    const now = this._ctx.currentTime;
+    const osc = this._ctx.createOscillator();
+    osc.frequency.value = 880; osc.type = 'sine';
+    const g = this._ctx.createGain();
+    g.gain.setValueAtTime(0.08, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+    osc.connect(g); g.connect(this._master);
+    osc.start(now); osc.stop(now + 0.05);
+  }
+
+  _ok() { return !!(this._ctx && this.enabled && this._ctx.state !== 'closed'); }
+}
+
 /* ── GAME STATE ──────────────────────────────────────────────── */
 const DEFAULT_STATE = {
   balance: 1000,
@@ -143,6 +343,7 @@ let currentStyles    = null;  // per-horse styles for current race
 let raceEngine       = null;
 let raceRenderer     = null;
 let animFrameId      = null;
+let audioMgr         = null;
 
 function loadState() {
   try {
@@ -423,9 +624,16 @@ function initBetting() {
     });
   });
 
-  e('btn-watch').addEventListener('click', () => { currentBet = null; showScreen('race'); });
+  e('btn-watch').addEventListener('click', () => {
+    if (!audioMgr) audioMgr = new AudioManager();
+    audioMgr.init();
+    audioMgr.playClick();
+    currentBet = null; showScreen('race');
+  });
 
   e('btn-bet').addEventListener('click', () => {
+    if (!audioMgr) audioMgr = new AudioManager();
+    audioMgr.init();
     const errEl = e('bet-err');
     errEl.classList.add('hidden');
     const amt = parseFloat(e('bet-amount').value);
@@ -1347,7 +1555,12 @@ function initRace() {
           <span class="text-xs font-semibold" style="color:${COND_COLOR[raceCondition]}">${raceCondition}</span>
           ${balanceDisplay}
         </div>
-        <div class="text-sm text-green-400 font-bold tabular-nums">$${gameState.balance.toLocaleString()}</div>
+        <div class="flex items-center gap-3">
+          <div class="text-sm text-green-400 font-bold tabular-nums">$${gameState.balance.toLocaleString()}</div>
+          <button id="btn-mute" title="Toggle sound"
+                  style="background:none;border:none;cursor:pointer;font-size:1.1rem;opacity:0.65;padding:2px 4px"
+                  onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.65">🔊</button>
+        </div>
       </div>
 
       <!-- Canvas -->
@@ -1366,9 +1579,23 @@ function initRace() {
   raceEngine   = new RaceEngine(race, raceCondition, raceSeed, currentStyles);
   raceRenderer = new RaceRenderer(canvas, raceEngine);
 
-  let lastTs       = null;
-  let resultsShown = false;
-  const reduced    = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  /* mute button */
+  const muteBtn = e('btn-mute');
+  if (muteBtn) {
+    muteBtn.addEventListener('click', () => {
+      if (!audioMgr) return;
+      const on = audioMgr.toggle();
+      muteBtn.textContent = on ? '🔊' : '🔇';
+    });
+  }
+
+  if (audioMgr) audioMgr.resume();
+
+  let lastTs        = null;
+  let resultsShown  = false;
+  let prevPhase     = 'gate';
+  let finishSounded = false;
+  const reduced     = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   function gameLoop(ts) {
     if (!lastTs) lastTs = ts;
@@ -1382,8 +1609,25 @@ function initRace() {
     raceRenderer.update(dt);
     raceRenderer.render();
 
+    /* ── Audio state machine ── */
+    const phase = raceEngine.phase;
+    if (prevPhase === 'gate' && phase === 'running') {
+      audioMgr?.playGateBell();
+      setTimeout(() => audioMgr?.startCrowd(), 120);
+    }
+    if (phase === 'running' && !reduced) {
+      audioMgr?.updateHoofbeats(raceEngine.horses);
+      audioMgr?.updateCrowd(raceEngine.getProgress());
+    }
+    if (phase === 'finished' && !finishSounded) {
+      finishSounded = true;
+      audioMgr?.crowdCheer();
+      setTimeout(() => audioMgr?.playFinish(raceEngine.isPhotoFinish()), 280);
+    }
+    prevPhase = phase;
+
     // Show results button once race finishes
-    if (raceEngine.phase === 'finished' && !resultsShown) {
+    if (phase === 'finished' && !resultsShown) {
       resultsShown = true;
       const delay  = raceEngine.isPhotoFinish() ? 2800 : 1500;
       setTimeout(() => {
@@ -1404,6 +1648,7 @@ function initRace() {
 
   screen.addEventListener('click', evt => {
     if (evt.target.id === 'btn-results' || evt.target.closest('#btn-results')) {
+      audioMgr?.stopCrowd();
       if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
       raceRenderer.destroy();
       showScreen('results');
