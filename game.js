@@ -677,6 +677,18 @@ class RaceRenderer {
     this.photoT  = 0;
     this.photoShown = false;
 
+    // Dirt / turf particles
+    this.particles = [];
+
+    // Parallax clouds (world-space x, fractional y within sky)
+    this.clouds = [
+      { wx: 200,  wy: 0.25, scale: 1.1,  speed: 6  },
+      { wx: 600,  wy: 0.55, scale: 0.75, speed: 9  },
+      { wx: 950,  wy: 0.35, scale: 1.3,  speed: 5  },
+      { wx: 1350, wy: 0.6,  scale: 0.9,  speed: 8  },
+      { wx: 400,  wy: 0.15, scale: 0.6,  speed: 11 },
+    ];
+
     // ResizeObserver for crisp HiDPI rendering
     this._ro = new ResizeObserver(() => this._resize());
     this._ro.observe(canvas.parentElement);
@@ -718,8 +730,22 @@ class RaceRenderer {
     const clampedT  = Math.max(0, Math.min(maxCam, targetCam));
     this.camX += (clampedT - this.camX) * 0.07;
 
-    // Parallax background offset
-    this.bgOff = this.camX * 0.28;
+    // Parallax background offset (clouds scroll at 18% camera speed)
+    this.bgOff = this.camX * 0.18;
+
+    // Drift clouds slowly in world space
+    for (const c of this.clouds) {
+      c.wx -= c.speed * dt;
+      if (c.wx < this.camX - 300) c.wx = this.camX + TRACK_LENGTH * 0.6 + Math.random() * 300;
+    }
+
+    // Spawn dirt particles from galloping horses
+    if (this.engine.phase === 'running') {
+      for (const h of this.engine.horses) {
+        if (!h.finished && h.velocity > 18) this._spawnParticles(h, dt);
+      }
+    }
+    this._updateParticles(dt);
 
     // Photo finish timer
     if (this.engine.phase === 'finished' && this.engine.isPhotoFinish()) {
@@ -732,6 +758,7 @@ class RaceRenderer {
     ctx.clearRect(0, 0, this.W, this.H);
     this._drawBg(ctx);
     this._drawTrack(ctx);
+    this._drawParticles(ctx);   // below horses
     this._drawFinishLine(ctx);
     this._drawHorses(ctx);
     this._drawHUD(ctx);
@@ -740,40 +767,123 @@ class RaceRenderer {
 
   /* ── Background ── */
   _drawBg(ctx) {
-    // Sky
+    /* sky gradient */
     const sky = ctx.createLinearGradient(0, 0, 0, this.trkTop);
-    sky.addColorStop(0, '#06080f');
-    sky.addColorStop(1, '#0d1635');
+    sky.addColorStop(0,   '#07091a');
+    sky.addColorStop(0.6, '#0f1d45');
+    sky.addColorStop(1,   '#1a2e5a');
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, this.W, this.trkTop);
 
-    // Grandstands (tiled, parallax)
-    const sw = 110;
+    /* stars (static, dense near top) */
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    const starSeed = mulberry32(42);
+    for (let i = 0; i < 60; i++) {
+      const sx = starSeed() * this.W;
+      const sy = starSeed() * this.trkTop * 0.8;
+      const sr = 0.5 + starSeed() * 0.8;
+      ctx.beginPath();
+      ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    /* parallax clouds */
+    for (const c of this.clouds) {
+      const sx = this.w2s(c.wx) - this.camX * 0.18 + c.wx * 0.18; // cloud parallax
+      const screenX = (c.wx - this.camX * 0.18) * (this.W / VIEWPORT_U) * 0.4 + this.W * 0.1;
+      const sy = this.trkTop * c.wy;
+      this._drawCloud(ctx, c.wx * (this.W / VIEWPORT_U) * 0.22 - this.bgOff * 0.9 + 50, sy, c.scale);
+    }
+
+    /* horizon haze */
+    const haze = ctx.createLinearGradient(0, this.trkTop * 0.65, 0, this.trkTop);
+    haze.addColorStop(0, 'rgba(30,50,100,0)');
+    haze.addColorStop(1, 'rgba(60,90,150,0.18)');
+    ctx.fillStyle = haze;
+    ctx.fillRect(0, this.trkTop * 0.65, this.W, this.trkTop * 0.35);
+
+    /* grandstands — tiled, parallax */
+    const sw  = 120;
     const off = -(this.bgOff % sw);
     for (let col = -1; col < Math.ceil(this.W / sw) + 2; col++) {
       const x = off + col * sw;
       if (x > this.W + sw || x + sw < -sw) continue;
-      // Stand body
-      ctx.fillStyle = '#111827';
+
+      /* stand body */
+      ctx.fillStyle = '#0f172a';
       ctx.fillRect(x + 1, 2, sw - 2, this.trkTop - 2);
-      // Colored seats
-      for (let row = 0; row < 3; row++) {
+
+      /* roof overhang */
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(x - 3, 1, sw + 5, 10);
+      ctx.fillStyle = '#0ea5e9';
+      ctx.fillRect(x - 3, 1, sw + 5, 3);
+
+      /* seat rows */
+      for (let row = 0; row < 4; row++) {
         for (let seat = 0; seat < 7; seat++) {
-          const sx = x + 5 + seat * 15;
-          if (sx < -15 || sx > this.W + 15) continue;
-          const colorIdx = (col * 7 + seat + row) % 4;
-          ctx.fillStyle = ['#be123c','#1d4ed8','#b45309','#166534'][colorIdx];
-          ctx.fillRect(sx, 5 + row * 18, 12, 13);
+          const sx2 = x + 5 + seat * 16;
+          if (sx2 < -16 || sx2 > this.W + 16) continue;
+          const ci = (col * 7 + seat + row * 3) & 3;
+          ctx.fillStyle = ['#9f1239','#1e40af','#92400e','#14532d'][ci];
+          ctx.fillRect(sx2, 14 + row * 17, 13, 12);
+          /* crowd silhouette heads */
+          ctx.fillStyle = 'rgba(0,0,0,0.4)';
+          ctx.beginPath();
+          ctx.arc(sx2 + 6, 13 + row * 17, 4, 0, Math.PI * 2);
+          ctx.fill();
         }
       }
+
+      /* flag */
+      const flagX = x + sw * 0.5;
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth   = 1;
+      ctx.beginPath(); ctx.moveTo(flagX, 0); ctx.lineTo(flagX, 10); ctx.stroke();
+      ctx.fillStyle = col % 2 === 0 ? '#f59e0b' : '#ef4444';
+      ctx.beginPath();
+      ctx.moveTo(flagX, 0);
+      ctx.lineTo(flagX + 10, 3);
+      ctx.lineTo(flagX, 7);
+      ctx.closePath();
+      ctx.fill();
     }
 
-    // Infield grass
+    /* infield grass — richer gradient */
     const grass = ctx.createLinearGradient(0, this.trkBot, 0, this.H);
-    grass.addColorStop(0, '#14532d');
-    grass.addColorStop(1, '#052e16');
+    grass.addColorStop(0,   '#15803d');
+    grass.addColorStop(0.4, '#166534');
+    grass.addColorStop(1,   '#052e16');
     ctx.fillStyle = grass;
     ctx.fillRect(0, this.trkBot, this.W, this.H - this.trkBot);
+
+    /* infield white rails / fence posts */
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(0, this.trkBot + 12);
+    ctx.lineTo(this.W, this.trkBot + 12);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  _drawCloud(ctx, cx, cy, scale) {
+    ctx.save();
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle   = '#c7d2fe';
+    const r = 20 * scale;
+    const offsets = [
+      [0, 0, r], [-r * 0.8, r * 0.3, r * 0.7],
+      [r * 0.8, r * 0.25, r * 0.75], [0, r * 0.5, r * 0.6],
+    ];
+    ctx.beginPath();
+    for (const [ox, oy, or2] of offsets) {
+      ctx.moveTo(cx + ox + or2, cy + oy);
+      ctx.arc(cx + ox, cy + oy, or2, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.restore();
   }
 
   /* ── Track surface, rails, lanes, distance markers ── */
@@ -873,105 +983,203 @@ class RaceRenderer {
 
   _drawHorse(ctx, horse, x, y) {
     const g   = horse.gallop;
-    const bob = Math.sin(g * 7.5) * 2.5;
-    const leanAng = Math.sin(g * 4) * 0.06;
-
-    // Scale horse to lane height
-    const S = Math.min(1.4, this.laneH / 38); // body scale factor
+    const S   = Math.max(0.62, Math.min(1.5, this.laneH / 40));
+    const bob = Math.sin(g * 7.5) * 2.4 * S;
 
     ctx.save();
     ctx.translate(x, y + bob);
-    ctx.rotate(leanAng);
 
-    // Motion trail
-    if (horse.velocity > 15 && !horse.finished) {
-      for (let t = 0; t < 3; t++) {
-        const tx  = -(t + 1) * horse.velocity * 0.022 * S;
-        const alp = 0.22 * (1 - t / 3);
-        ctx.globalAlpha = alp;
-        ctx.fillStyle   = horse.color;
-        ctx.beginPath();
-        ctx.ellipse(tx - 8 * S, 0, 16 * S, 6 * S, 0, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.globalAlpha = 1;
-    }
-
-    // Horse body (brown)
-    ctx.fillStyle = '#8B6914';
+    /* ── ground shadow ── */
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle   = '#000';
     ctx.beginPath();
-    ctx.ellipse(-2 * S, 2 * S, 22 * S, 9 * S, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, this.laneH * 0.4, 26 * S, 4 * S, 0, 0, Math.PI * 2);
     ctx.fill();
+    ctx.restore();
 
-    // Neck
-    ctx.fillStyle = '#7a5c10';
-    ctx.beginPath();
-    ctx.ellipse(16 * S, -5 * S, 9 * S, 5 * S, -0.35, 0, Math.PI * 2);
-    ctx.fill();
+    /* slight forward lean */
+    ctx.rotate(-0.04 + Math.sin(g * 4) * 0.04);
 
-    // Head
-    ctx.fillStyle = '#6b4f0d';
-    ctx.beginPath();
-    ctx.ellipse(24 * S, -11 * S, 7 * S, 5 * S, 0.25, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Nose
-    ctx.fillStyle = '#5a3d08';
-    ctx.beginPath();
-    ctx.ellipse(29 * S, -11 * S, 4 * S, 3 * S, 0.1, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Eye
-    ctx.fillStyle = '#111';
-    ctx.beginPath();
-    ctx.arc(25 * S, -13 * S, 1.2 * S, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Legs (4) with gallop animation
-    ctx.strokeStyle = '#5a4010';
-    ctx.lineWidth   = 2.2 * S;
+    /* ── TAIL ── */
+    const tSwing = Math.sin(g * 5.5) * 9 * S;
+    ctx.save();
+    ctx.strokeStyle = '#4e320a';
+    ctx.lineWidth   = 3.5 * S;
     ctx.lineCap     = 'round';
-    const legPos = [
-      { bx: -16 * S, phase: 0 },
-      { bx: -6  * S, phase: Math.PI },
-      { bx:  4  * S, phase: Math.PI * 0.5 },
-      { bx:  14 * S, phase: Math.PI * 1.5 },
+    ctx.beginPath();
+    ctx.moveTo(-19 * S, -1 * S);
+    ctx.bezierCurveTo(-25 * S, 4 * S, -31 * S, tSwing, -28 * S, tSwing + 14 * S);
+    ctx.stroke();
+    /* tail hair strands */
+    ctx.lineWidth = 1.8 * S;
+    for (let t = -1; t <= 1; t++) {
+      ctx.beginPath();
+      ctx.moveTo(-28 * S, tSwing + 12 * S);
+      ctx.quadraticCurveTo(-30 * S + t * 4 * S, tSwing + 20 * S, -27 * S + t * 7 * S, tSwing + 26 * S);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    /* ── LEGS (drawn before body so body covers their tops) ── */
+    const legDefs = [
+      { bx: -13 * S, phase: 0              },
+      { bx: -3  * S, phase: Math.PI        },
+      { bx:  6  * S, phase: Math.PI * 0.55 },
+      { bx:  14 * S, phase: Math.PI * 1.55 },
     ];
-    for (const lp of legPos) {
-      const ang = Math.sin(g * 7.5 + lp.phase) * 0.42;
+    for (const ld of legDefs) {
+      const ang1 =  Math.sin(g * 7.5 + ld.phase) * 0.48;
+      const ang2 = -Math.abs(Math.sin(g * 7.5 + ld.phase + 0.45)) * 0.52;
       ctx.save();
-      ctx.translate(lp.bx, 10 * S);
-      ctx.rotate(ang);
+      ctx.translate(ld.bx, 8 * S);
+      ctx.strokeStyle = '#6b4e0c';
+      ctx.lineWidth   = 3 * S;
+      ctx.lineCap     = 'round';
+      ctx.rotate(ang1);
       ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 11 * S); ctx.stroke();
-      ctx.rotate(Math.abs(ang) * 0.5);
-      ctx.beginPath(); ctx.moveTo(0, 11 * S); ctx.lineTo(1 * S, 20 * S); ctx.stroke();
+      ctx.translate(0, 11 * S);
+      ctx.rotate(ang2);
+      ctx.strokeStyle = '#5a3e08';
+      ctx.lineWidth   = 2.4 * S;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 9 * S); ctx.stroke();
+      /* hoof */
+      ctx.fillStyle = '#2a1a04';
+      ctx.beginPath();
+      ctx.ellipse(0, 9.5 * S, 3.2 * S, 1.8 * S, 0, 0, Math.PI * 2);
+      ctx.fill();
       ctx.restore();
     }
 
-    // Jockey body (silk color)
+    /* ── BODY (bezier silhouette) ── */
+    ctx.fillStyle = '#8B6914';
+    ctx.beginPath();
+    ctx.moveTo(-20 * S, 7 * S);
+    ctx.bezierCurveTo(-23 * S, 0, -19 * S, -10 * S, -10 * S, -10.5 * S);
+    ctx.bezierCurveTo(-4 * S, -12 * S, 5 * S, -12.5 * S, 10 * S, -10 * S);
+    ctx.bezierCurveTo(16 * S, -7 * S, 20 * S, -1 * S, 18 * S, 7 * S);
+    ctx.bezierCurveTo(10 * S, 9.5 * S, -12 * S, 9.5 * S, -20 * S, 7 * S);
+    ctx.closePath();
+    ctx.fill();
+
+    /* body highlight / shading */
+    const hiG = ctx.createLinearGradient(0, -13 * S, 0, 9 * S);
+    hiG.addColorStop(0, 'rgba(255,210,80,0.2)');
+    hiG.addColorStop(0.45, 'rgba(255,255,255,0)');
+    hiG.addColorStop(1, 'rgba(0,0,0,0.28)');
+    ctx.fillStyle = hiG;
+    ctx.beginPath();
+    ctx.moveTo(-20 * S, 7 * S);
+    ctx.bezierCurveTo(-23 * S, 0, -19 * S, -10 * S, -10 * S, -10.5 * S);
+    ctx.bezierCurveTo(-4 * S, -12 * S, 5 * S, -12.5 * S, 10 * S, -10 * S);
+    ctx.bezierCurveTo(16 * S, -7 * S, 20 * S, -1 * S, 18 * S, 7 * S);
+    ctx.bezierCurveTo(10 * S, 9.5 * S, -12 * S, 9.5 * S, -20 * S, 7 * S);
+    ctx.closePath();
+    ctx.fill();
+
+    /* ── NECK ── */
+    ctx.fillStyle = '#7d5a12';
+    ctx.beginPath();
+    ctx.moveTo(10 * S, 5 * S);
+    ctx.bezierCurveTo(18 * S, -2 * S, 22 * S, -14 * S, 18 * S, -20 * S);
+    ctx.bezierCurveTo(15 * S, -23 * S, 9 * S, -24 * S, 6 * S, -20 * S);
+    ctx.bezierCurveTo(3 * S, -15 * S, 5 * S, -5 * S, 10 * S, 5 * S);
+    ctx.closePath();
+    ctx.fill();
+
+    /* mane strands */
+    ctx.strokeStyle = '#3e2606';
+    ctx.lineWidth   = 2.4 * S;
+    ctx.lineCap     = 'round';
+    for (let m = 0; m < 4; m++) {
+      const mSwing = Math.sin(g * 6 + m * 0.85) * 3 * S;
+      ctx.beginPath();
+      ctx.moveTo((10 - m * 2) * S, (-12 - m * 2) * S);
+      ctx.quadraticCurveTo((5 - m + mSwing) * S, (-7 - m * 2) * S, (3 - m + mSwing * 1.5) * S, (-2 - m * 2) * S);
+      ctx.stroke();
+    }
+
+    /* ── HEAD ── */
+    ctx.fillStyle = '#7d5a12';
+    ctx.beginPath();
+    ctx.moveTo(16 * S, -18 * S);
+    ctx.bezierCurveTo(19 * S, -23 * S, 24 * S, -25 * S, 27 * S, -23 * S);
+    ctx.bezierCurveTo(30 * S, -21 * S, 31 * S, -16 * S, 30 * S, -13 * S);
+    ctx.bezierCurveTo(29 * S, -10 * S, 27 * S, -7.5 * S, 24 * S, -7.5 * S);
+    ctx.bezierCurveTo(20 * S, -7.5 * S, 17 * S, -10 * S, 16 * S, -14 * S);
+    ctx.closePath();
+    ctx.fill();
+
+    /* nostril */
+    ctx.fillStyle = '#5a3d09';
+    ctx.beginPath();
+    ctx.ellipse(29.5 * S, -12 * S, 1.8 * S, 1.4 * S, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+
+    /* eye */
+    ctx.fillStyle = '#0d0701';
+    ctx.beginPath();
+    ctx.arc(25 * S, -20.5 * S, 2 * S, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.beginPath();
+    ctx.arc(25.8 * S, -21 * S, 0.75 * S, 0, Math.PI * 2);
+    ctx.fill();
+
+    /* ── JOCKEY ── */
+    /* breeches */
+    ctx.fillStyle = '#e8e4d0';
+    ctx.beginPath();
+    ctx.ellipse(7 * S, -9 * S, 6 * S, 9 * S, 0.08, 0, Math.PI * 2);
+    ctx.fill();
+
+    /* silks */
     ctx.fillStyle = horse.color;
     ctx.beginPath();
-    ctx.ellipse(6 * S, -14 * S, 7 * S, 9 * S, 0, 0, Math.PI * 2);
+    ctx.ellipse(6 * S, -17 * S, 6 * S, 8 * S, 0, 0, Math.PI * 2);
     ctx.fill();
-
-    // Jockey helmet
-    const helmetColor = this._darken(horse.color, 0.55);
-    ctx.fillStyle = helmetColor;
+    /* silk stripe */
+    ctx.fillStyle = this._lighten(horse.color, 1.55);
     ctx.beginPath();
-    ctx.arc(13 * S, -20 * S, 5 * S, 0, Math.PI * 2);
+    ctx.ellipse(6 * S, -17 * S, 2.5 * S, 8 * S, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Jockey visor
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    /* helmet */
+    ctx.fillStyle = this._darken(horse.color, 0.6);
     ctx.beginPath();
-    ctx.arc(13 * S, -20 * S, 5 * S, 0.1, Math.PI * 0.9);
+    ctx.arc(11.5 * S, -23 * S, 5.5 * S, 0, Math.PI * 2);
     ctx.fill();
 
-    // Post number on jockey
-    ctx.fillStyle = '#fff';
-    ctx.font = `bold ${Math.max(7, 8 * S)}px sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.fillText(horse.laneIdx + 1, 6 * S, -10 * S);
+    /* visor brim */
+    ctx.fillStyle = this._darken(horse.color, 0.45);
+    ctx.beginPath();
+    ctx.ellipse(15 * S, -19 * S, 4.5 * S, 2 * S, 0.25, 0, Math.PI * 2);
+    ctx.fill();
+
+    /* goggles glint */
+    ctx.strokeStyle = 'rgba(180,225,255,0.8)';
+    ctx.lineWidth   = 1.4 * S;
+    ctx.beginPath();
+    ctx.arc(14.5 * S, -21 * S, 2.8 * S, -Math.PI * 0.75, Math.PI * 0.1);
+    ctx.stroke();
+
+    /* post number on silks */
+    ctx.fillStyle    = '#fff';
+    ctx.font         = `bold ${Math.max(7, 9 * S)}px sans-serif`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(horse.laneIdx + 1, 6 * S, -17 * S);
+    ctx.textBaseline = 'alphabetic';
+
+    /* riding crop */
+    ctx.strokeStyle = '#7a5c14';
+    ctx.lineWidth   = Math.max(1.2, 1.8 * S);
+    ctx.lineCap     = 'round';
+    ctx.save();
+    ctx.translate(2 * S, -11 * S);
+    ctx.rotate(-0.25 + Math.sin(g * 7.5) * 0.12);
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -13 * S); ctx.stroke();
+    ctx.restore();
 
     ctx.restore();
   }
@@ -1052,6 +1260,62 @@ class RaceRenderer {
         this.W / 2, this.H / 2 + size * 0.7
       );
     }
+  }
+
+  /* ── Dirt / turf particle system ── */
+  _spawnParticles(horse, dt) {
+    // Throttle: spawn roughly every 2–4 frames
+    if (Math.random() > Math.min(0.5, dt * 25)) return;
+
+    const baseY  = this.laneY(horse.laneIdx);
+    const hoofY  = baseY + this.laneH * 0.32;
+    const isMud  = this.engine.condition === 'Muddy';
+    const count  = 1 + (Math.random() < 0.3 ? 1 : 0);
+
+    for (let i = 0; i < count; i++) {
+      this.particles.push({
+        wx:    horse.position - 5 - Math.random() * 20,  // world x
+        sy:    hoofY + Math.random() * 4,                // screen y at spawn
+        vwx:   -(20 + Math.random() * 35),               // world-units/s backward
+        vsy:   -(18 + Math.random() * 28),               // px/s upward
+        life:  0.45 + Math.random() * 0.35,
+        size:  isMud ? 3 + Math.random() * 4 : 2 + Math.random() * 3,
+        r:     isMud ? 90  : 160,
+        gv:    isMud ? 65  : 115,
+        bv:    isMud ? 40  : 65,
+      });
+    }
+    if (this.particles.length > 220) this.particles.splice(0, 40);
+  }
+
+  _updateParticles(dt) {
+    const gravity = 55;
+    for (const p of this.particles) {
+      p.wx  += p.vwx * dt;
+      p.vsy += gravity * dt;
+      p.sy  += p.vsy * dt;
+      p.life -= dt;
+    }
+    this.particles = this.particles.filter(p => p.life > 0 && p.sy < this.trkBot + 10);
+  }
+
+  _drawParticles(ctx) {
+    for (const p of this.particles) {
+      const sx = this.w2s(p.wx);
+      if (sx < -20 || sx > this.W + 20) continue;
+      const alpha = Math.min(1, p.life / 0.25) * 0.72;
+      ctx.fillStyle = `rgba(${p.r},${p.gv},${p.bv},${alpha})`;
+      ctx.beginPath();
+      ctx.ellipse(sx, p.sy, p.size, p.size * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  _lighten(hex, f) {
+    const r = Math.min(255, parseInt(hex.slice(1, 3), 16) * f);
+    const g = Math.min(255, parseInt(hex.slice(3, 5), 16) * f);
+    const b = Math.min(255, parseInt(hex.slice(5, 7), 16) * f);
+    return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
   }
 
   _darken(hex, f) {
