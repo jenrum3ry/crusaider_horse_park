@@ -376,17 +376,38 @@ class AudioManager {
     if (!window.speechSynthesis) return;
     const speak = () => {
       window.speechSynthesis.cancel();
-      const utt   = new SpeechSynthesisUtterance(text);
-      utt.rate    = 1.05;
-      utt.pitch   = 0.82;
-      utt.volume  = 0.95;
+      const utt  = new SpeechSynthesisUtterance(text);
+      utt.rate   = 0.88;   // slower = more gravitas
+      utt.pitch  = 0.65;   // deeper = authoritative announcer
+      utt.volume = 1.0;
       const voices = window.speechSynthesis.getVoices();
-      const male = voices.find(v =>
-        v.lang.startsWith('en') && (
-          /male|daniel|david|mark|george|alex|fred|tom|james|arthur|ryan/i.test(v.name)
-        )
-      ) || voices.find(v => v.lang.startsWith('en'));
-      if (male) utt.voice = male;
+      // Prioritised list of known deep/clear English male voices
+      const preferred = [
+        'Google UK English Male',     // Chrome — clear, deep British
+        'Microsoft Guy Online (Natural)',  // Edge/Win — natural deep
+        'Microsoft Ryan Online (Natural)', // Edge/Win — natural male
+        'Daniel',                     // macOS — crisp British male
+        'Arthur',                     // macOS Ventura+ British
+        'Malcolm',                    // macOS Scottish, deep
+        'Alex',                       // macOS classic deep voice
+        'Microsoft David Desktop',    // Win offline deep
+        'Microsoft Mark Desktop',     // Win offline
+        'Google US English',          // Chrome fallback
+        'Rishi',                      // macOS Indian English, deep
+      ];
+      let chosen = null;
+      for (const name of preferred) {
+        chosen = voices.find(v => v.name === name);
+        if (chosen) break;
+      }
+      // Generic fallback: any male-sounding English voice
+      if (!chosen) {
+        chosen = voices.find(v =>
+          v.lang.startsWith('en') &&
+          /male|daniel|david|mark|alex|tom|james|arthur|ryan|guy|rishi|malcolm/i.test(v.name)
+        ) || voices.find(v => v.lang.startsWith('en'));
+      }
+      if (chosen) utt.voice = chosen;
       window.speechSynthesis.speak(utt);
     };
     window.speechSynthesis.getVoices().length
