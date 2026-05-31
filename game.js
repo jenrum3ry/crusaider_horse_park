@@ -306,6 +306,94 @@ class AudioManager {
     }
   }
 
+  /* ── Classic "Call to the Post" racing trumpet fanfare (win) ── */
+  playCallToPost() {
+    if (!this._ok()) return;
+    const now = this._ctx.currentTime;
+    // 7-note ascending bugle call used at racetracks worldwide
+    const melody = [
+      { f: 392,  t: 0.0,  d: 0.28 },  // G4
+      { f: 523,  t: 0.28, d: 0.28 },  // C5
+      { f: 659,  t: 0.56, d: 0.28 },  // E5
+      { f: 784,  t: 0.84, d: 0.44 },  // G5 (dotted quarter)
+      { f: 659,  t: 1.28, d: 0.14 },  // E5 (eighth)
+      { f: 784,  t: 1.42, d: 0.44 },  // G5
+      { f: 1047, t: 1.86, d: 0.95 },  // C6 (held)
+    ];
+    for (const n of melody) {
+      const osc = this._ctx.createOscillator();
+      osc.type = 'sawtooth'; osc.frequency.value = n.f;
+      // Subtle vibrato
+      const vib = this._ctx.createOscillator();
+      vib.frequency.value = 6.2;
+      const vibG = this._ctx.createGain(); vibG.gain.value = n.f * 0.014;
+      vib.connect(vibG); vibG.connect(osc.frequency);
+      // Warm brass filter
+      const lp = this._ctx.createBiquadFilter();
+      lp.type = 'lowpass'; lp.frequency.value = n.f * 3.8;
+      const g = this._ctx.createGain();
+      g.gain.setValueAtTime(0.001, now + n.t);
+      g.gain.linearRampToValueAtTime(0.30, now + n.t + 0.022);
+      g.gain.setValueAtTime(0.25, now + n.t + n.d - 0.04);
+      g.gain.linearRampToValueAtTime(0.001, now + n.t + n.d);
+      osc.connect(lp); lp.connect(g); g.connect(this._master);
+      const s = now + n.t, e2 = now + n.t + n.d + 0.05;
+      osc.start(s); osc.stop(e2); vib.start(s); vib.stop(e2);
+    }
+  }
+
+  /* ── Sad trombone "wa-wa-waaaa" (loss) ── */
+  playSadTrombone() {
+    if (!this._ok()) return;
+    const now = this._ctx.currentTime;
+    const wahs = [
+      { sf: 466, ef: 349, ff: 1400, ft: 350, t: 0.00, d: 0.42 },
+      { sf: 440, ef: 311, ff: 1200, ft: 260, t: 0.40, d: 0.45 },
+      { sf: 415, ef: 207, ff:  980, ft: 170, t: 0.82, d: 1.55 },
+    ];
+    for (const w of wahs) {
+      const osc = this._ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(w.sf, now + w.t);
+      osc.frequency.exponentialRampToValueAtTime(w.ef, now + w.t + w.d);
+      // Plunger-mute bandpass that closes down
+      const filt = this._ctx.createBiquadFilter();
+      filt.type = 'bandpass'; filt.Q.value = 4.5;
+      filt.frequency.setValueAtTime(w.ff, now + w.t);
+      filt.frequency.exponentialRampToValueAtTime(w.ft, now + w.t + w.d);
+      const g = this._ctx.createGain();
+      g.gain.setValueAtTime(0.001, now + w.t);
+      g.gain.linearRampToValueAtTime(0.38, now + w.t + 0.04);
+      g.gain.setValueAtTime(0.32, now + w.t + w.d * 0.55);
+      g.gain.exponentialRampToValueAtTime(0.001, now + w.t + w.d);
+      osc.connect(filt); filt.connect(g); g.connect(this._master);
+      osc.start(now + w.t); osc.stop(now + w.t + w.d + 0.08);
+    }
+  }
+
+  /* ── Speech synthesis — "And they are racing!" ── */
+  playVoice(text) {
+    if (!window.speechSynthesis) return;
+    const speak = () => {
+      window.speechSynthesis.cancel();
+      const utt   = new SpeechSynthesisUtterance(text);
+      utt.rate    = 1.05;
+      utt.pitch   = 0.82;
+      utt.volume  = 0.95;
+      const voices = window.speechSynthesis.getVoices();
+      const male = voices.find(v =>
+        v.lang.startsWith('en') && (
+          /male|daniel|david|mark|george|alex|fred|tom|james|arthur|ryan/i.test(v.name)
+        )
+      ) || voices.find(v => v.lang.startsWith('en'));
+      if (male) utt.voice = male;
+      window.speechSynthesis.speak(utt);
+    };
+    window.speechSynthesis.getVoices().length
+      ? speak()
+      : (window.speechSynthesis.onvoiceschanged = () => { speak(); window.speechSynthesis.onvoiceschanged = null; });
+  }
+
   /* ── UI click ── */
   playClick() {
     if (!this._ok()) return;
@@ -1560,6 +1648,9 @@ function initRace() {
           <button id="btn-mute" title="Toggle sound"
                   style="background:none;border:none;cursor:pointer;font-size:1.1rem;opacity:0.65;padding:2px 4px"
                   onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.65">🔊</button>
+          <button id="btn-race-restart" title="Restart season"
+                  style="background:none;border:none;cursor:pointer;font-size:0.75rem;color:#6b7280;padding:2px 4px"
+                  onmouseover="this.style.color='#f87171'" onmouseout="this.style.color='#6b7280'">↩ Restart</button>
         </div>
       </div>
 
@@ -1589,6 +1680,14 @@ function initRace() {
     });
   }
 
+  /* race-screen restart button */
+  const raceRestartBtn = e('btn-race-restart');
+  if (raceRestartBtn) {
+    raceRestartBtn.addEventListener('click', () => {
+      if (confirm('Start a fresh season? Your current record will be cleared.')) resetSeason();
+    });
+  }
+
   if (audioMgr) audioMgr.resume();
 
   let lastTs        = null;
@@ -1613,6 +1712,7 @@ function initRace() {
     const phase = raceEngine.phase;
     if (prevPhase === 'gate' && phase === 'running') {
       audioMgr?.playGateBell();
+      audioMgr?.playVoice("And they are racing!");
       setTimeout(() => audioMgr?.startCrowd(), 120);
     }
     if (phase === 'running' && !reduced) {
@@ -1622,7 +1722,6 @@ function initRace() {
     if (phase === 'finished' && !finishSounded) {
       finishSounded = true;
       audioMgr?.crowdCheer();
-      setTimeout(() => audioMgr?.playFinish(raceEngine.isPhotoFinish()), 280);
     }
     prevPhase = phase;
 
@@ -1681,6 +1780,15 @@ function initResults() {
       gameState.seasonStats.racesWon++;
     } else {
       betResult = { won: false, profit: 0, totalRet: 0 };
+    }
+  }
+
+  /* ── Play outcome audio ── */
+  if (betResult) {
+    if (betResult.won) {
+      setTimeout(() => audioMgr?.playCallToPost(), 400);
+    } else {
+      setTimeout(() => audioMgr?.playSadTrombone(), 400);
     }
   }
 
@@ -1774,12 +1882,16 @@ function initResults() {
       <button id="btn-next" class="btn-primary text-base">
         ${isLast ? '🏁  View Season Summary' : `Next: ${RACES[gameState.currentRace]?.name} →`}
       </button>
+      <button id="btn-results-restart" class="btn-danger mt-3">↩  Restart Season</button>
     </div>
   `;
 
   e('btn-next').addEventListener('click', () => {
     if (gameState.currentRace >= 8) showScreen('finale');
     else showScreen('betting');
+  });
+  e('btn-results-restart').addEventListener('click', () => {
+    if (confirm('Start a fresh season? Your current record will be cleared.')) resetSeason();
   });
 }
 
