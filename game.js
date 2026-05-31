@@ -1657,11 +1657,6 @@ function initRace() {
       <!-- Canvas -->
       <div id="canvas-container" style="flex:1;position:relative;overflow:hidden;background:#020617">
         <canvas id="race-canvas" style="display:block;width:100%"></canvas>
-        <div id="race-overlay" style="position:absolute;bottom:0;left:0;right:0;display:flex;align-items:center;justify-content:center;padding:1.5rem;background:linear-gradient(transparent,rgba(2,6,23,0.88));pointer-events:none">
-          <button id="btn-results" class="btn-primary" style="display:inline-block;width:auto;padding:.875rem 2.5rem;font-size:1.05rem;opacity:0;transform:translateY(12px);transition:opacity .4s,transform .4s;pointer-events:none">
-            View Results →
-          </button>
-        </div>
       </div>
     </div>
   `;
@@ -1725,18 +1720,15 @@ function initRace() {
     }
     prevPhase = phase;
 
-    // Show results button once race finishes
+    // Auto-advance to results once race finishes
     if (phase === 'finished' && !resultsShown) {
       resultsShown = true;
-      const delay  = raceEngine.isPhotoFinish() ? 2800 : 1500;
+      const delay  = raceEngine.isPhotoFinish() ? 3000 : 1800;
       setTimeout(() => {
-        const btn = e('btn-results');
-        if (btn) {
-          btn.style.opacity     = '1';
-          btn.style.transform   = 'translateY(0)';
-          btn.style.pointerEvents = 'auto';
-          e('race-overlay').style.pointerEvents = 'auto';
-        }
+        audioMgr?.stopCrowd();
+        if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
+        raceRenderer.destroy();
+        showScreen('results');
       }, delay);
     }
 
@@ -1744,15 +1736,6 @@ function initRace() {
   }
 
   animFrameId = requestAnimationFrame(gameLoop);
-
-  screen.addEventListener('click', evt => {
-    if (evt.target.id === 'btn-results' || evt.target.closest('#btn-results')) {
-      audioMgr?.stopCrowd();
-      if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
-      raceRenderer.destroy();
-      showScreen('results');
-    }
-  });
 }
 
 /* ════════════════════════════════════════════════════════════════
