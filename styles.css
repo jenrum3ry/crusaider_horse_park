@@ -270,6 +270,10 @@ body {
   .bet-input { font-size: 1rem; /* prevent iOS zoom */ }
 }
 
+/* ── Bet type tab strip (hide scrollbar) ─────────────────────── */
+.bet-type-strip::-webkit-scrollbar { display: none; }
+.bet-type-strip { -ms-overflow-style: none; scrollbar-width: none; }
+
 /* ── Reduced motion overrides ────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

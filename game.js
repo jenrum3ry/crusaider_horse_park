@@ -31,6 +31,16 @@ const STYLE_ICON  = { 'front-runner': '⚡', stalker: '🎯', closer: '🚀' };
 const CONDITIONS  = ['Fast', 'Good', 'Muddy'];
 const COND_COLOR  = { Fast: '#f1c40f', Good: '#4ade80', Muddy: '#60a5fa' };
 
+const BET_TYPE_META = {
+  'win':          { label: 'Win',       short: 'WIN', desc: 'Horse finishes 1st',                     picks: 1, combos: 1 },
+  'place':        { label: 'Place',     short: 'PLC', desc: 'Horse finishes 1st or 2nd',              picks: 1, combos: 1 },
+  'show':         { label: 'Show',      short: 'SHW', desc: 'Horse finishes 1st, 2nd or 3rd',         picks: 1, combos: 1 },
+  'exacta':       { label: 'Exacta',    short: 'EX',  desc: 'Pick 1st & 2nd in exact order',          picks: 2, combos: 1 },
+  'exacta-box':   { label: 'Ex. Box',   short: 'EXB', desc: 'Pick 1st & 2nd in any order (2 combos)', picks: 2, combos: 2 },
+  'trifecta':     { label: 'Trifecta',  short: 'TRI', desc: 'Pick 1st, 2nd & 3rd in exact order',    picks: 3, combos: 1 },
+  'trifecta-box': { label: 'Tri. Box',  short: 'TRB', desc: 'Pick 3 horses to finish 1-2-3 any order (6 combos)', picks: 3, combos: 6 },
+};
+
 /* ── RACE DATA ───────────────────────────────────────────────── */
 const RACES = [
   {
@@ -445,7 +455,7 @@ const DEFAULT_STATE = {
 };
 
 let gameState        = loadState();
-let currentBet       = null;  // { horseIndex, amount, horse }
+let currentBets      = [];    // array of bet objects
 let raceCondition    = null;
 let raceSeed         = null;
 let currentStyles    = null;  // per-horse styles for current race
@@ -473,6 +483,55 @@ function resetSeason() {
 }
 
 function decimalOdds(h) { return h.odds[0] / h.odds[1] + 1; }
+
+function checkBetWon(bet, sorted) {
+  const s = bet.selections;
+  switch (bet.type) {
+    case 'win':          return sorted[0]?.laneIdx === s[0];
+    case 'place':        return s[0] === sorted[0]?.laneIdx || s[0] === sorted[1]?.laneIdx;
+    case 'show':         return [sorted[0]?.laneIdx, sorted[1]?.laneIdx, sorted[2]?.laneIdx].includes(s[0]);
+    case 'exacta':       return sorted[0]?.laneIdx === s[0] && sorted[1]?.laneIdx === s[1];
+    case 'exacta-box':   return (sorted[0]?.laneIdx === s[0] && sorted[1]?.laneIdx === s[1])
+                             || (sorted[0]?.laneIdx === s[1] && sorted[1]?.laneIdx === s[0]);
+    case 'trifecta':     return sorted[0]?.laneIdx === s[0] && sorted[1]?.laneIdx === s[1] && sorted[2]?.laneIdx === s[2];
+    case 'trifecta-box': {
+      const top3 = [sorted[0]?.laneIdx, sorted[1]?.laneIdx, sorted[2]?.laneIdx];
+      return s.length === 3 && s.every(x => top3.includes(x));
+    }
+    default: return false;
+  }
+}
+
+function calcBetPayout(bet, sorted) {
+  if (!checkBetWon(bet, sorted)) return 0;
+  const dec = h => h.odds[0] / h.odds[1] + 1;
+  const amt = bet.amount;
+  const hs  = bet.horses;
+  switch (bet.type) {
+    case 'win':          return amt + amt * (hs[0].odds[0] / hs[0].odds[1]);
+    case 'place':        return amt + amt * (hs[0].odds[0] / hs[0].odds[1] * 0.45);
+    case 'show':         return amt + amt * (hs[0].odds[0] / hs[0].odds[1] * 0.22);
+    case 'exacta':
+    case 'exacta-box':   return amt * dec(hs[0]) * dec(hs[1]) * 0.65;
+    case 'trifecta':
+    case 'trifecta-box': return amt * dec(hs[0]) * dec(hs[1]) * dec(hs[2]) * 0.40;
+    default: return 0;
+  }
+}
+
+function previewBetPayout(type, horses, amount) {
+  const dec = h => h.odds[0] / h.odds[1] + 1;
+  switch (type) {
+    case 'win':          return amount + amount * (horses[0].odds[0] / horses[0].odds[1]);
+    case 'place':        return amount + amount * (horses[0].odds[0] / horses[0].odds[1] * 0.45);
+    case 'show':         return amount + amount * (horses[0].odds[0] / horses[0].odds[1] * 0.22);
+    case 'exacta':
+    case 'exacta-box':   return amount * dec(horses[0]) * dec(horses[1]) * 0.65;
+    case 'trifecta':
+    case 'trifecta-box': return amount * dec(horses[0]) * dec(horses[1]) * dec(horses[2]) * 0.40;
+    default: return 0;
+  }
+}
 
 /* ── SCREEN MANAGER ──────────────────────────────────────────── */
 const SCREEN_IDS = ['menu', 'betting', 'race', 'results', 'finale'];
@@ -568,7 +627,6 @@ function initBetting() {
   const race = RACES[gameState.currentRace];
   raceSeed   = Date.now() ^ (Math.random() * 0xFFFFFFFF | 0);
 
-  // Assign running styles using seeded RNG based on odds
   const rng = mulberry32(raceSeed + 99);
   currentStyles = race.horses.map(h => {
     const dec = decimalOdds(h);
@@ -579,187 +637,251 @@ function initBetting() {
     return r < 0.6 ? 'closer' : 'stalker';
   });
 
-  // Track condition for this race (seeded so it's reproducible)
   raceCondition = CONDITIONS[Math.floor(rng() * CONDITIONS.length)];
-  currentBet = null;
+  currentBets   = [];
 
   const screen = e('screen-betting');
-  screen.innerHTML = `
-    <div class="max-w-2xl mx-auto px-4 pb-8 min-h-screen">
+  let activeBetType = 'win';
+  let selections    = [];
+  let lastAmt       = '';
 
-      <!-- Header -->
-      <div class="flex items-center justify-between pt-5 pb-4">
-        <div>
-          <h2 class="text-2xl font-bold">${race.name}</h2>
-          <span class="text-sm font-semibold" style="color:${COND_COLOR[raceCondition]}">
-            Track: ${raceCondition}
-          </span>
-        </div>
-        <div class="text-right">
-          <div class="text-xs text-gray-500 uppercase tracking-wider">Balance</div>
-          <div id="bet-balance" class="text-2xl font-bold text-green-400 tabular-nums">
-            $${gameState.balance.toLocaleString()}
-          </div>
-        </div>
-      </div>
+  function guideText() {
+    const m = BET_TYPE_META[activeBetType];
+    const needed = m.picks - selections.length;
+    if (needed === 0) return '';
+    if (m.picks === 1) return 'Click a horse to select';
+    if (activeBetType.includes('box'))
+      return needed === m.picks ? `Pick ${m.picks} horses (order doesn't matter)` : `Pick ${needed} more horse${needed > 1 ? 's' : ''}`;
+    const ord = ['1st','2nd','3rd'];
+    return `Pick your ${ord[selections.length]} place horse`;
+  }
 
-      <!-- Condition explanation -->
-      <div class="text-xs text-gray-500 mb-4 px-1">
-        ${raceCondition === 'Fast'  ? '⚡ Fast track — front-runners gain an edge; quick footing for all.' : ''}
-        ${raceCondition === 'Good'  ? '✅ Good track — balanced conditions; no style advantage.' : ''}
-        ${raceCondition === 'Muddy' ? '🌧 Muddy track — closers thrive; front-runners may tire faster.' : ''}
-      </div>
+  function ticketRowsHTML() {
+    return currentBets.map((b, bi) => {
+      const sep = (b.type === 'exacta' || b.type === 'trifecta') ? ' → ' : ' + ';
+      return `<div class="flex items-center gap-2 px-4 py-2.5 border-b border-gray-800/60">
+        <span class="text-xs font-bold px-1.5 py-0.5 rounded flex-shrink-0"
+              style="background:rgba(245,158,11,0.15);color:#fbbf24">${BET_TYPE_META[b.type].short}</span>
+        <div class="flex-1 min-w-0 text-sm truncate text-gray-200">${b.horses.map(h => h.name).join(sep)}</div>
+        <span class="text-xs text-gray-400 flex-shrink-0 tabular-nums">$${b.cost.toFixed(0)}</span>
+        <button class="remove-bet flex-shrink-0" data-bidx="${bi}"
+                style="background:none;border:none;cursor:pointer;color:#6b7280;font-size:1.1rem;line-height:1;padding:0 2px"
+                onmouseover="this.style.color='#f87171'" onmouseout="this.style.color='#6b7280'">×</button>
+      </div>`;
+    }).join('');
+  }
 
-      <!-- Horse table -->
-      <div class="bg-gray-900 border border-gray-800 rounded-xl mb-4 overflow-hidden">
-        <div class="grid text-xs text-gray-500 uppercase tracking-wider px-4 py-2 border-b border-gray-800"
-             style="grid-template-columns:2rem 1fr 3.5rem 5.5rem 2rem">
-          <div>#</div><div>Horse</div><div class="text-center">Odds</div>
-          <div class="text-center">Style</div><div></div>
-        </div>
-        ${race.horses.map((h, i) => `
-          <div class="horse-row grid items-center px-4 py-3 border-b border-gray-800/50"
-               style="grid-template-columns:2rem 1fr 3.5rem 5.5rem 2rem"
-               data-idx="${i}" id="hrow-${i}">
-            <div>
-              <span class="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white"
-                    style="background:${SILK_COLORS[i % SILK_COLORS.length]}">
-                ${i + 1}
-              </span>
-            </div>
-            <div>
-              <div class="font-medium text-sm leading-tight">${h.name}</div>
-            </div>
-            <div class="text-center">
-              <span class="odds-chip">${h.odds[0]}/${h.odds[1]}</span>
-            </div>
-            <div class="text-center text-xs text-gray-400">
-              ${STYLE_ICON[currentStyles[i]]} ${STYLE_LABEL[currentStyles[i]]}
-            </div>
-            <div class="flex items-center justify-center">
-              <div class="w-4 h-4 rounded-full border-2 border-gray-600 transition-all" id="sel-${i}"></div>
-            </div>
-          </div>
-        `).join('')}
-      </div>
+  function render() {
+    const m        = BET_TYPE_META[activeBetType];
+    const complete = selections.length === m.picks;
+    const totalCost = currentBets.reduce((s, b) => s + b.cost, 0);
 
-      <!-- Bet panel -->
-      <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-4">
-        <div id="bet-prompt" class="text-center text-gray-500 text-sm py-1">
-          Click a horse to place your bet (optional)
-        </div>
-        <div id="bet-form" class="hidden">
-          <div class="flex items-center justify-between mb-3">
-            <div id="bet-horse-label" class="text-sm font-semibold text-yellow-300"></div>
-            <div class="text-right">
-              <div class="text-xs text-gray-500">Potential return</div>
-              <div id="payout-preview" class="text-green-400 font-bold">—</div>
-            </div>
-          </div>
-          <div class="flex gap-2 mb-2">
-            <input type="number" id="bet-amount" class="bet-input flex-1" placeholder="Wager ($)" min="1">
-            <div class="flex gap-1">
-              <button class="quick-bet-btn" data-v="50">$50</button>
-              <button class="quick-bet-btn" data-v="100">$100</button>
-              <button class="quick-bet-btn" data-v="250">$250</button>
-            </div>
-          </div>
-          <div id="bet-err" class="text-red-400 text-xs hidden mb-1"></div>
-        </div>
-      </div>
+    screen.innerHTML = `
+<div class="max-w-2xl mx-auto px-4 pb-10 min-h-screen">
 
-      <!-- Actions -->
-      <div class="flex gap-3">
-        <button id="btn-watch" class="btn-secondary" style="flex:1">Just Watch</button>
-        <button id="btn-bet"   class="btn-primary"   style="flex:1" disabled>Place Bet &amp; Race</button>
-      </div>
-      <p class="text-center text-gray-700 text-xs mt-3">Race ${gameState.currentRace + 1} of 8</p>
+  <!-- Header -->
+  <div class="flex items-start justify-between pt-5 pb-3">
+    <div>
+      <h2 class="text-2xl font-bold">${race.name}</h2>
+      <span class="text-sm font-semibold" style="color:${COND_COLOR[raceCondition]}">${raceCondition} Track</span>
     </div>
-  `;
+    <div class="text-right">
+      <div class="text-xs text-gray-500 uppercase tracking-wider">Balance</div>
+      <div class="text-2xl font-bold text-green-400 tabular-nums">$${gameState.balance.toLocaleString()}</div>
+    </div>
+  </div>
 
-  let selIdx = -1;
+  <p class="text-xs text-gray-500 mb-4">${raceCondition === 'Fast' ? '⚡ Fast — front-runners gain an edge.' : raceCondition === 'Good' ? '✅ Good — balanced, no style advantage.' : '🌧 Muddy — closers thrive; front-runners fade.'}</p>
 
-  function selectHorse(idx) {
-    // Deselect previous
-    if (selIdx >= 0) {
-      e('hrow-' + selIdx).classList.remove('selected');
-      e('sel-' + selIdx).style.cssText = '';
-    }
+  <!-- Bet type tabs -->
+  <div class="flex gap-1.5 mb-1 pb-2" style="overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none">
+    ${Object.entries(BET_TYPE_META).map(([id, bm]) => `<button class="bet-type-tab flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold border transition-all" data-type="${id}" style="${activeBetType === id ? 'background:#f59e0b;color:#000;border-color:#f59e0b' : 'background:transparent;color:#9ca3af;border-color:#374151'}">${bm.label}</button>`).join('')}
+  </div>
+  <p class="text-xs text-gray-500 mb-2">${m.desc}${m.combos > 1 ? ` &nbsp;<span style="color:#fbbf24">·&nbsp;$X base = $${m.combos}X total</span>` : ''}</p>
 
-    if (selIdx === idx) { // toggle off
-      selIdx = -1;
-      e('bet-prompt').classList.remove('hidden');
-      e('bet-form').classList.add('hidden');
-      e('btn-bet').disabled = true;
-      return;
-    }
+  <!-- Selection guide -->
+  <p class="text-xs text-yellow-500 mb-2 h-4">${guideText()}</p>
 
-    selIdx = idx;
-    const row = e('hrow-' + idx);
-    row.classList.add('selected');
-    e('sel-' + idx).style.cssText = `background:${SILK_COLORS[idx % SILK_COLORS.length]};border-color:${SILK_COLORS[idx % SILK_COLORS.length]}`;
+  <!-- Horse table -->
+  <div class="bg-gray-900 border border-gray-800 rounded-xl mb-4 overflow-hidden">
+    ${race.horses.map((h, i) => {
+      const selPos = selections.indexOf(i);
+      const isSel  = selPos >= 0;
+      return `<div class="horse-row flex items-center gap-3 px-4 py-3 border-b border-gray-800/50${isSel ? ' selected' : ''}" data-idx="${i}" id="hrow-${i}">
+        <span class="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold text-white" style="background:${SILK_COLORS[i % SILK_COLORS.length]}">${i + 1}</span>
+        <div class="flex-1 min-w-0">
+          <div class="font-medium text-sm">${h.name}</div>
+          <div class="text-xs text-gray-500">${STYLE_ICON[currentStyles[i]]} ${STYLE_LABEL[currentStyles[i]]}</div>
+        </div>
+        <span class="odds-chip">${h.odds[0]}/${h.odds[1]}</span>
+        <div class="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold transition-all" id="badge-${i}"
+             style="${isSel ? `background:${SILK_COLORS[i % SILK_COLORS.length]};color:#fff;border:2px solid ${SILK_COLORS[i % SILK_COLORS.length]}` : 'background:transparent;border:2px solid #374151;color:transparent'}">
+          ${isSel ? `#${selPos + 1}` : '&nbsp;'}
+        </div>
+      </div>`;
+    }).join('')}
+  </div>
 
-    e('bet-prompt').classList.add('hidden');
-    e('bet-form').classList.remove('hidden');
-    e('btn-bet').disabled = false;
+  <!-- Bet builder -->
+  <div id="bet-builder" ${complete ? '' : 'style="display:none"'}>
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-3">
+      <div class="text-xs text-gray-400 mb-3">
+        ${activeBetType.includes('box') ? '<span class="font-bold text-yellow-500">BOX</span> &nbsp;' : ''}${selections.map(idx => `<span class="font-semibold text-white">${race.horses[idx].name}</span>`).join(activeBetType === 'exacta' || activeBetType === 'trifecta' ? ' <span class="text-gray-600">→</span> ' : ' <span class="text-gray-600">+</span> ')}
+      </div>
+      <div class="flex gap-2 mb-2">
+        <input type="number" id="bet-amount" class="bet-input flex-1" placeholder="$ per unit" min="1" value="${lastAmt}">
+        <div class="flex gap-1">
+          <button class="quick-bet-btn" data-v="10">$10</button>
+          <button class="quick-bet-btn" data-v="50">$50</button>
+          <button class="quick-bet-btn" data-v="100">$100</button>
+        </div>
+      </div>
+      <div class="flex justify-between text-xs text-gray-400 mb-3">
+        <span>Total cost: <strong class="text-white" id="cost-preview">${lastAmt ? '$' + (parseFloat(lastAmt) * m.combos).toFixed(2) : '—'}</strong></span>
+        <span>Max return: <strong class="text-green-400" id="return-preview">—</strong></span>
+      </div>
+      <div id="bet-err" class="text-red-400 text-xs mb-2 hidden"></div>
+      <button id="btn-add-bet" class="btn-primary" style="padding:0.6rem 1rem;font-size:0.9rem">+ Add to Ticket</button>
+    </div>
+  </div>
 
-    const h = race.horses[idx];
-    e('bet-horse-label').textContent = `${h.name}  ${h.odds[0]}/${h.odds[1]}`;
-    updatePayout();
+  <!-- Ticket -->
+  ${currentBets.length > 0 ? `
+  <div class="mb-4">
+    <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Your Ticket</div>
+    <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden mb-2" id="ticket-list">
+      ${ticketRowsHTML()}
+    </div>
+    <div class="flex justify-between items-center text-sm px-1">
+      <span class="text-gray-500">Total wagered</span>
+      <span class="font-bold text-white">$${totalCost.toFixed(2)}</span>
+    </div>
+  </div>` : ''}
+
+  <!-- Actions -->
+  <div class="flex gap-3 mt-4">
+    <button id="btn-watch" class="btn-secondary" style="flex:1">Just Watch</button>
+    <button id="btn-start" class="btn-primary" style="flex:1">${currentBets.length > 0 ? 'Start Race →' : 'Watch Race →'}</button>
+  </div>
+  <p class="text-center text-gray-700 text-xs mt-3">Race ${gameState.currentRace + 1} of 8</p>
+</div>`;
+
+    bind();
   }
 
-  function updatePayout() {
-    if (selIdx < 0) return;
-    const amt = parseFloat(e('bet-amount').value);
-    if (!amt || amt <= 0) { e('payout-preview').textContent = '—'; return; }
-    const h   = race.horses[selIdx];
-    const win = amt * (h.odds[0] / h.odds[1]);
-    e('payout-preview').textContent = `$${(amt + win).toFixed(2)}`;
-  }
-
-  // Horse row clicks
-  screen.querySelectorAll('.horse-row').forEach(row => {
-    row.addEventListener('click', () => selectHorse(parseInt(row.dataset.idx)));
-  });
-
-  e('bet-amount').addEventListener('input', updatePayout);
-
-  // Quick-bet buttons
-  screen.querySelectorAll('.quick-bet-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const v = Math.min(parseInt(btn.dataset.v), gameState.balance);
-      e('bet-amount').value = v;
-      updatePayout();
+  function bind() {
+    screen.querySelectorAll('.bet-type-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        activeBetType = btn.dataset.type;
+        selections = [];
+        render();
+      });
     });
-  });
 
-  e('btn-watch').addEventListener('click', () => {
-    if (!audioMgr) audioMgr = new AudioManager();
-    audioMgr.init();
-    audioMgr.playClick();
-    currentBet = null; showScreen('race');
-  });
+    screen.querySelectorAll('.horse-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const idx  = parseInt(row.dataset.idx);
+        const m    = BET_TYPE_META[activeBetType];
+        const pos  = selections.indexOf(idx);
+        if (pos >= 0) {
+          selections.splice(pos, 1);
+        } else if (selections.length < m.picks) {
+          selections.push(idx);
+        } else if (m.picks === 1) {
+          selections = [idx];
+        }
+        render();
+      });
+    });
 
-  e('btn-bet').addEventListener('click', () => {
-    if (!audioMgr) audioMgr = new AudioManager();
-    audioMgr.init();
-    const errEl = e('bet-err');
-    errEl.classList.add('hidden');
-    const amt = parseFloat(e('bet-amount').value);
+    const amtEl = e('bet-amount');
+    if (amtEl) {
+      amtEl.addEventListener('input', () => { lastAmt = amtEl.value; refreshPreviews(); });
+      screen.querySelectorAll('.quick-bet-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const v = Math.min(parseInt(btn.dataset.v), gameState.balance);
+          if (amtEl) { amtEl.value = v; lastAmt = String(v); refreshPreviews(); }
+        });
+      });
+      if (lastAmt) { amtEl.value = lastAmt; refreshPreviews(); }
+    }
+
+    const addBtn = e('btn-add-bet');
+    if (addBtn) addBtn.addEventListener('click', addToTicket);
+
+    screen.querySelectorAll('.remove-bet').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const bi = parseInt(btn.dataset.bidx);
+        const b  = currentBets[bi];
+        gameState.balance += b.cost;
+        gameState.seasonStats.totalWagered -= b.cost;
+        gameState.seasonStats.betsPlaced--;
+        currentBets.splice(bi, 1);
+        saveState();
+        render();
+      });
+    });
+
+    e('btn-watch').addEventListener('click', () => {
+      if (!audioMgr) { audioMgr = new AudioManager(); audioMgr.init(); }
+      audioMgr.playClick();
+      // Refund any queued bets
+      for (const b of currentBets) {
+        gameState.balance += b.cost;
+        gameState.seasonStats.totalWagered -= b.cost;
+        gameState.seasonStats.betsPlaced--;
+      }
+      currentBets = [];
+      saveState();
+      showScreen('race');
+    });
+
+    e('btn-start').addEventListener('click', () => {
+      if (!audioMgr) { audioMgr = new AudioManager(); audioMgr.init(); }
+      audioMgr.playClick();
+      showScreen('race');
+    });
+  }
+
+  function refreshPreviews() {
+    const m = BET_TYPE_META[activeBetType];
+    if (selections.length !== m.picks) return;
+    const amt = parseFloat(e('bet-amount')?.value);
+    const costEl   = e('cost-preview');
+    const retEl    = e('return-preview');
+    if (!costEl || !retEl) return;
     if (!amt || amt <= 0 || !Number.isFinite(amt)) {
-      errEl.textContent = 'Enter a valid wager amount.'; errEl.classList.remove('hidden'); return;
+      costEl.textContent = '—'; retEl.textContent = '—'; return;
     }
-    if (amt > gameState.balance) {
-      errEl.textContent = `You only have $${gameState.balance.toLocaleString()} available.`; errEl.classList.remove('hidden'); return;
+    const horses = selections.map(i => race.horses[i]);
+    costEl.textContent  = '$' + (amt * m.combos).toFixed(2);
+    retEl.textContent   = '$' + previewBetPayout(activeBetType, horses, amt).toFixed(2);
+  }
+
+  function addToTicket() {
+    const errEl = e('bet-err');
+    if (errEl) errEl.classList.add('hidden');
+    const amt = parseFloat(e('bet-amount')?.value);
+    if (!amt || amt <= 0 || !Number.isFinite(amt)) {
+      if (errEl) { errEl.textContent = 'Enter a valid wager.'; errEl.classList.remove('hidden'); } return;
     }
-    const h = race.horses[selIdx];
-    currentBet = { horseIndex: selIdx, amount: amt, horse: h };
-    gameState.balance -= amt;
-    gameState.seasonStats.totalWagered += amt;
+    const m    = BET_TYPE_META[activeBetType];
+    const cost = amt * m.combos;
+    if (cost > gameState.balance) {
+      if (errEl) { errEl.textContent = `Need $${cost.toFixed(2)} — only $${gameState.balance.toFixed(2)} left.`; errEl.classList.remove('hidden'); } return;
+    }
+    const horses = selections.map(i => race.horses[i]);
+    currentBets.push({ type: activeBetType, amount: amt, cost, selections: [...selections], horses });
+    gameState.balance -= cost;
+    gameState.seasonStats.totalWagered += cost;
     gameState.seasonStats.betsPlaced++;
     saveState();
-    showScreen('race');
-  });
+    lastAmt    = String(amt);
+    selections = [];
+    render();
+  }
+
+  render();
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -1650,8 +1772,9 @@ function initRace() {
   const race   = RACES[gameState.currentRace];
   const screen = e('screen-race');
 
-  const balanceDisplay = currentBet
-    ? `<span class="text-xs text-gray-500 ml-3">Bet $${currentBet.amount} on ${currentBet.horse.name}</span>`
+  const totalRisked    = currentBets.reduce((s, b) => s + b.cost, 0);
+  const balanceDisplay = currentBets.length > 0
+    ? `<span class="text-xs text-gray-500 ml-3">${currentBets.length} bet${currentBets.length > 1 ? 's' : ''} · $${totalRisked.toFixed(0)} risked</span>`
     : '';
 
   screen.innerHTML = `
@@ -1769,27 +1892,29 @@ function initResults() {
     ? finishOrd
     : [...finishOrd, ...raceEngine.getSorted().filter(h => !finishOrd.includes(h))];
 
-  /* ── Compute bet outcome ── */
-  let betResult = null;
-  if (currentBet && sorted.length > 0) {
-    const winner    = sorted[0];
-    const wonBet    = (currentBet.horseIndex === winner.laneIdx);
-    if (wonBet) {
-      const profit    = currentBet.amount * (currentBet.horse.odds[0] / currentBet.horse.odds[1]);
-      const totalRet  = currentBet.amount + profit;
-      betResult = { won: true, profit, totalRet };
-      gameState.balance += totalRet;
-      gameState.seasonStats.totalReturned += totalRet;
+  /* ── Compute bet outcomes ── */
+  let totalReturn = 0;
+  let anyWon = false;
+  let allLost = currentBets.length > 0;
+  const betResults = currentBets.map(bet => {
+    const payout = calcBetPayout(bet, sorted);
+    const won    = payout > 0;
+    if (won) {
+      anyWon  = true;
+      allLost = false;
+      totalReturn += payout;
+      const profit = payout - bet.cost;
+      gameState.balance += payout;
+      gameState.seasonStats.totalReturned += payout;
       if (profit > gameState.seasonStats.biggestWin) gameState.seasonStats.biggestWin = profit;
       gameState.seasonStats.racesWon++;
-    } else {
-      betResult = { won: false, profit: 0, totalRet: 0 };
     }
-  }
+    return { bet, payout, won };
+  });
 
   /* ── Play outcome audio ── */
-  if (betResult) {
-    if (betResult.won) {
+  if (currentBets.length > 0) {
+    if (anyWon) {
       setTimeout(() => audioMgr?.playCallToPost(), 400);
     } else {
       setTimeout(() => audioMgr?.playSadTrombone(), 400);
@@ -1822,7 +1947,7 @@ function initResults() {
         </div>
         ${top4.map((horse, idx) => {
           const pos      = idx + 1;
-          const isBet    = currentBet && currentBet.horseIndex === horse.laneIdx;
+          const isBet    = currentBets.some(b => b.selections.includes(horse.laneIdx));
           const margin   = idx === 0
             ? 'Winner'
             : `+${(horse.exactFinish - sorted[0].exactFinish).toFixed(2)}s`;
@@ -1851,28 +1976,40 @@ function initResults() {
         }).join('')}
       </div>
 
-      <!-- Bet outcome -->
-      ${currentBet ? `
-        <div class="${betResult.won ? 'bet-outcome-win' : 'bet-outcome-loss'} mb-4">
-          <div class="flex items-center justify-between">
-            <div>
-              <div class="font-bold text-base ${betResult.won ? 'text-green-400' : 'text-red-400'}">
-                ${betResult.won ? '🏆 Winner! You picked it.' : '❌ Better luck next time.'}
-              </div>
-              <div class="text-sm text-gray-400 mt-0.5">
-                $${currentBet.amount} on ${currentBet.horse.name}
-                @ <span class="odds-chip">${currentBet.horse.odds[0]}/${currentBet.horse.odds[1]}</span>
-              </div>
-            </div>
-            <div class="text-right ml-4">
-              <div class="text-xl font-bold ${betResult.won ? 'text-green-400' : 'text-red-400'}">
-                ${betResult.won ? `+$${betResult.profit.toFixed(2)}` : `-$${currentBet.amount.toFixed(2)}`}
-              </div>
-              ${betResult.won ? `<div class="text-xs text-gray-400">return: $${betResult.totalRet.toFixed(2)}</div>` : ''}
-            </div>
+      <!-- Bet outcomes -->
+      ${currentBets.length > 0 ? `
+        <div class="bg-gray-900 border border-gray-800 rounded-xl mb-4 overflow-hidden">
+          <div class="px-4 py-2 text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
+            Your Ticket
           </div>
+          ${betResults.map(({ bet, payout, won }) => {
+            const sep = (bet.type === 'exacta' || bet.type === 'trifecta') ? ' → ' : ' + ';
+            const profit = payout - bet.cost;
+            return `
+              <div class="flex items-center gap-3 px-4 py-3 border-b border-gray-800/50 ${won ? 'bg-green-900/10' : 'bg-red-900/5'}">
+                <span class="text-xs font-bold px-1.5 py-0.5 rounded flex-shrink-0"
+                      style="background:rgba(245,158,11,0.15);color:#fbbf24">${BET_TYPE_META[bet.type].short}</span>
+                <div class="flex-1 min-w-0">
+                  <div class="text-sm truncate">${bet.horses.map(h => h.name).join(sep)}</div>
+                  <div class="text-xs text-gray-500">$${bet.cost.toFixed(0)} wagered</div>
+                </div>
+                <div class="text-right flex-shrink-0">
+                  <div class="font-bold text-sm ${won ? 'text-green-400' : 'text-red-400'}">
+                    ${won ? '+$' + profit.toFixed(2) : '-$' + bet.cost.toFixed(2)}
+                  </div>
+                  ${won ? `<div class="text-xs text-gray-500">return $${payout.toFixed(2)}</div>` : `<div class="text-xs text-gray-600">${won ? '' : '❌'}</div>`}
+                </div>
+              </div>`;
+          }).join('')}
+          ${betResults.length > 1 ? `
+            <div class="flex justify-between items-center px-4 py-2.5 text-sm">
+              <span class="text-gray-500">Net result</span>
+              <span class="font-bold ${anyWon ? 'text-green-400' : 'text-red-400'}">
+                ${anyWon ? '+$' + (totalReturn - currentBets.reduce((s,b)=>s+b.cost,0)).toFixed(2) : '-$' + currentBets.reduce((s,b)=>s+b.cost,0).toFixed(2)}
+              </span>
+            </div>` : ''}
         </div>
-      ` : '<p class="text-center text-gray-600 text-sm mb-4">No bet placed this race.</p>'}
+      ` : '<p class="text-center text-gray-600 text-sm mb-4">No bets placed this race.</p>'}
 
       <!-- Current balance -->
       <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-5 text-center">
